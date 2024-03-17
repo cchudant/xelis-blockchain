@@ -41,6 +41,8 @@ regex = "1"
 serde_regex = "1.1.0"
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 primitive-types = { version = "0.12.2", features = ["serde"] }
+itertools = "0.12.1"
+futures = "0.3.30"
 
 [features]
 json_rpc = ["dep:reqwest"]

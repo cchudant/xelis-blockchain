@@ -1,16 +1,18 @@
 use crate::{
     crypto::{
-        elgamal::{CompressedCiphertext, CompressedCommitment, CompressedHandle, CompressedPublicKey},
+        elgamal::{
+            CompressedCiphertext, CompressedCommitment, CompressedHandle, CompressedPublicKey,
+        },
         proofs::{CiphertextValidityProof, CommitmentEqProof},
-        Hash,
-        Hashable,
-        Signature,
+        Hash, Hashable, PublicKey, Signature,
     },
-    serializer::{Reader, ReaderError, Serializer, Writer}
+    serializer::{Reader, ReaderError, Serializer, Writer},
 };
 use bulletproofs::RangeProof;
+use itertools::Either;
 use log::debug;
 use serde::{Deserialize, Serialize};
+use std::iter;
 
 pub mod builder;
 pub mod verify;
@@ -49,7 +51,7 @@ pub struct TransferPayload {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BurnPayload {
     pub asset: Hash,
-    pub amount: u64
+    pub amount: u64,
 }
 
 // this enum represent all types of transaction available on XELIS Network
@@ -128,13 +130,37 @@ impl TransferPayload {
     }
 
     // Take all data
-    pub fn consume(self) -> (Hash, CompressedPublicKey, Option<Vec<u8>>, CompressedCommitment, CompressedHandle, CompressedHandle) {
-        (self.asset, self.destination, self.extra_data, self.commitment, self.sender_handle, self.receiver_handle)
+    pub fn consume(
+        self,
+    ) -> (
+        Hash,
+        CompressedPublicKey,
+        Option<Vec<u8>>,
+        CompressedCommitment,
+        CompressedHandle,
+        CompressedHandle,
+    ) {
+        (
+            self.asset,
+            self.destination,
+            self.extra_data,
+            self.commitment,
+            self.sender_handle,
+            self.receiver_handle,
+        )
     }
 }
 
 impl Transaction {
-    pub fn new(source: CompressedPublicKey, data: TransactionType, fee: u64, nonce: u64, source_commitments: Vec<SourceCommitment>, range_proof: RangeProof, signature: Signature) -> Self {
+    pub fn new(
+        source: CompressedPublicKey,
+        data: TransactionType,
+        fee: u64,
+        nonce: u64,
+        source_commitments: Vec<SourceCommitment>,
+        range_proof: RangeProof,
+        signature: Signature,
+    ) -> Self {
         Transaction {
             version: 0,
             source,
@@ -143,7 +169,7 @@ impl Transaction {
             nonce,
             source_commitments,
             range_proof,
-            signature
+            signature,
         }
     }
 
@@ -190,6 +216,15 @@ impl Transaction {
     pub fn consume(self) -> (CompressedPublicKey, TransactionType) {
         (self.source, self.data)
     }
+
+    pub fn get_modified_accounts<'a>(&'a self) -> impl Iterator<Item = (Role, &'a PublicKey)> {
+        iter::once((Role::Sender, &self.source)).chain(match &self.data {
+            TransactionType::Transfers(transfers) => {
+                Either::Left(transfers.iter().map(|t| (Role::Receiver, &t.destination)))
+            }
+            TransactionType::Burn(_) => Either::Right(iter::empty()),
+        })
+    }
 }
 
 impl Serializer for SourceCommitment {
@@ -207,7 +242,7 @@ impl Serializer for SourceCommitment {
         Ok(SourceCommitment {
             commitment,
             proof,
-            asset
+            asset,
         })
     }
 
@@ -238,7 +273,7 @@ impl Serializer for TransferPayload {
         let extra_data = if has_extra_data {
             let extra_data_size = reader.read_u16()? as usize;
             if extra_data_size > EXTRA_DATA_LIMIT_SIZE {
-                return Err(ReaderError::InvalidSize)
+                return Err(ReaderError::InvalidSize);
             }
 
             Some(reader.read_bytes(extra_data_size)?)
@@ -258,13 +293,18 @@ impl Serializer for TransferPayload {
             commitment,
             sender_handle,
             receiver_handle,
-            ct_validity_proof
+            ct_validity_proof,
         })
     }
 
     fn size(&self) -> usize {
         // + 1 for the bool
-        let mut size = self.asset.size() + self.destination.size() + 1 + self.commitment.size() + self.sender_handle.size() + self.receiver_handle.size();
+        let mut size = self.asset.size()
+            + self.destination.size()
+            + 1
+            + self.commitment.size()
+            + self.sender_handle.size()
+            + self.receiver_handle.size();
         if let Some(extra_data) = &self.extra_data {
             // + 2 for the size of the extra data
             size += 2 + extra_data.len();
@@ -282,10 +322,7 @@ impl Serializer for BurnPayload {
     fn read(reader: &mut Reader) -> Result<BurnPayload, ReaderError> {
         let asset = Hash::read(reader)?;
         let amount = reader.read_u64()?;
-        Ok(BurnPayload {
-            asset,
-            amount
-        })
+        Ok(BurnPayload { asset, amount })
     }
 
     fn size(&self) -> usize {
@@ -317,11 +354,11 @@ impl Serializer for TransactionType {
             0 => {
                 let payload = BurnPayload::read(reader)?;
                 TransactionType::Burn(payload)
-            },
+            }
             1 => {
                 let txs_count = reader.read_u8()?;
                 if txs_count == 0 || txs_count > MAX_TRANSFER_COUNT as u8 {
-                    return Err(ReaderError::InvalidSize)
+                    return Err(ReaderError::InvalidSize);
                 }
 
                 let mut txs = Vec::with_capacity(txs_count as usize);
@@ -329,18 +366,14 @@ impl Serializer for TransactionType {
                     txs.push(TransferPayload::read(reader)?);
                 }
                 TransactionType::Transfers(txs)
-            },
-            _ => {
-                return Err(ReaderError::InvalidValue)
             }
+            _ => return Err(ReaderError::InvalidValue),
         })
     }
 
     fn size(&self) -> usize {
         match self {
-            TransactionType::Burn(payload) => {
-                1 + payload.size()
-            },
+            TransactionType::Burn(payload) => 1 + payload.size(),
             TransactionType::Transfers(txs) => {
                 let mut size = 1;
                 for tx in txs {
@@ -374,7 +407,7 @@ impl Serializer for Transaction {
         // At this moment we only support version 0, so we check it here directly
         if version != 0 {
             debug!("Expected version 0 got version {version}");
-            return Err(ReaderError::InvalidValue)
+            return Err(ReaderError::InvalidValue);
         }
 
         let source = CompressedPublicKey::read(reader)?;
@@ -384,7 +417,7 @@ impl Serializer for Transaction {
 
         let commitments_len = reader.read_u8()?;
         if commitments_len == 0 || commitments_len > MAX_TRANSFER_COUNT as u8 {
-            return Err(ReaderError::InvalidSize)
+            return Err(ReaderError::InvalidSize);
         }
 
         let mut source_commitments = Vec::with_capacity(commitments_len as usize);
@@ -403,7 +436,7 @@ impl Serializer for Transaction {
             nonce,
             source_commitments,
             range_proof,
-            signature
+            signature,
         })
     }
 
